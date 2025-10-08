@@ -53,13 +53,13 @@ function loadDashboardData() {
         const routedToAgent = document.querySelector('.metric-card:last-child p');
         
         if (totalSessions && routedToAgent) {
-            totalSessions.textContent = '1,245 sessions today';
-            routedToAgent.textContent = '89% routing success';
+            totalSessions.textContent = '1 sessions today';
+            routedToAgent.textContent = '87% response rate';
         }
         
         const chatSummary = document.querySelector('.chat-summary-content p');
         if (chatSummary) {
-            chatSummary.textContent = 'Recent customer inquiries focused on billing (34%) and technical support (28%). Average resolution time: 4.2 minutes.';
+            chatSummary.textContent = 'Chat summary will appear here once interactions occur.';
         }
     }, 500);
 }
