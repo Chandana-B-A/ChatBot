@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { Storage } = require('@google-cloud/storage');
+const basicAuth = require('./middleware/auth');
 require('dotenv').config();
 
 const app = express();
@@ -30,6 +31,7 @@ const fileName = 'order.json';
 let ordersData = null;
 let lastFetchTime = 0;
 const CACHE_DURATION = 5 * 60 * 1000;
+
 
 // Function to fetch data from Cloud Storage
 async function fetchOrderData() {
@@ -61,7 +63,7 @@ app.get('/', (req, res) => {
     res.json({ message: 'Welcome to the server!' });
 });
 
-app.post('/api/order', async (req, res) => {
+app.post('/api/order', basicAuth, async (req, res) => {
     try {
         const { orderId } = req.body;
         
