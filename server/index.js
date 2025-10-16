@@ -69,6 +69,13 @@ const {
     fetchTrackingStatus
 } = require('./services/orderVerification');
 
+// Import order cancellation functions
+const {
+    verifyOrderId: verifyOrderIdCancel,
+    verifyPhone: verifyPhoneCancel,
+    updateOrderData
+} = require('./services/orderCancel');
+
 app.post('/api/order', basicAuth, async (req, res) => {
     console.log(req.body);
     try {
@@ -115,6 +122,138 @@ app.post('/api/order', basicAuth, async (req, res) => {
         return res.status(200).json({ success: true, data: order });
     } catch (error) {
         return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Order Cancellation Endpoint - Uses orderCancel.js functions
+app.post('/api/orderCancel', basicAuth, async (req, res) => {
+    console.log('Order cancellation endpoint called with body:', req.body);
+    try {
+        let tag = req.body.fulfillmentInfo?.tag || req.body.tag;
+        console.log('Cancellation tag:', tag);
+        
+        let orderId = req.body.sessionInfo?.parameters?.orderid || req.body.orderId;
+        let phoneNumber = req.body.sessionInfo?.parameters?.phoneNumber || req.body.phoneNumber;
+        
+        console.log('OrderId:', orderId, 'PhoneNumber:', phoneNumber);
+
+        if (tag === 'verify-orderid-cancel' || tag === 'verify_orderId') {
+            console.log('Verifying order ID for cancellation');
+            
+            const result = await verifyOrderIdCancel(orderId);
+            console.log('verifyOrderIdCancel result:', result);
+            
+            if (result.success) {
+                return res.status(200).json({
+                    success: true,
+                    data: result.data,
+                    sessionInfo: { parameters: { orderFound: 'true' } }
+                });
+            } else {
+                return res.status(200).json({
+                    success: false,
+                    error: result.error,
+                    message: result.message
+                });
+            }
+        }
+
+        if (tag === 'verify-phone-cancel') {
+            console.log('Verifying phone number for cancellation');
+            
+            if (!orderId || !phoneNumber) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Missing required fields',
+                    message: 'Both orderId and phoneNumber are required'
+                });
+            }
+            
+            const result = await verifyPhoneCancel(orderId, phoneNumber);
+            console.log('verifyPhoneCancel result:', result);
+            
+            return res.status(200).json(result);
+        }
+
+        if (tag === 'cancel-order') {
+            console.log('Processing order cancellation');
+            
+            if (!orderId || !phoneNumber) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Missing required fields',
+                    message: 'Both orderId and phoneNumber are required for cancellation'
+                });
+            }
+            
+            // First verify the phone number
+            const phoneVerification = await verifyPhoneCancel(orderId, phoneNumber);
+            
+            if (!phoneVerification.success) {
+                return res.status(200).json(phoneVerification);
+            }
+            
+            // If phone verification successful, proceed with cancellation
+            try {
+                // Fetch current orders data
+                const orders = await fetchOrderData();
+                
+                // Find and update the order
+                const orderIndex = orders.findIndex(order => 
+                    order.orderId === parseInt(orderId) && 
+                    order.phNum === parseInt(phoneNumber)
+                );
+                
+                if (orderIndex === -1) {
+                    return res.status(200).json({
+                        success: false,
+                        error: 'Order not found',
+                        message: 'Order not found for cancellation'
+                    });
+                }
+                
+                // Mark order as cancelled
+                orders[orderIndex].cancelled = true;
+                orders[orderIndex].status = 'cancelled';
+                
+                // Update the data in cloud storage
+                await updateOrderData(orders);
+                
+                return res.status(200).json({
+                    success: true,
+                    message: 'Order cancelled successfully',
+                    data: {
+                        orderId: orders[orderIndex].orderId,
+                        bookName: orders[orderIndex].bookName,
+                        status: 'cancelled',
+                        cancelled: true
+                    }
+                });
+                
+            } catch (updateError) {
+                console.error('Error updating order:', updateError);
+                return res.status(500).json({
+                    success: false,
+                    error: 'Update failed',
+                    message: 'Failed to cancel order. Please try again.'
+                });
+            }
+        }
+
+        // Default response for unknown tags
+        return res.status(400).json({
+            success: false,
+            error: 'Invalid tag',
+            message: 'Unknown operation tag'
+        });
+        
+    } catch (error) {
+        console.error('Order cancellation error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            message: 'Unable to process cancellation request'
+        });
     }
 });
 
