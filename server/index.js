@@ -63,34 +63,58 @@ app.get('/', (req, res) => {
     res.json({ message: 'Welcome to the server!' });
 });
 
+const {
+    verifyOrderId,
+    verifyPhoneNumber,
+    fetchTrackingStatus
+} = require('./services/orderVerification');
+
 app.post('/api/order', basicAuth, async (req, res) => {
+    console.log(req.body);
     try {
-        const { orderId } = req.body;
+        let tag = req.body.fulfillmentInfo.tag;
+        console.log(tag);
         
-        if (!orderId) {
-            return res.status(400).json({ 
-                error: 'Order ID is required'
-            });
-        }
+        let orderId = req.body.sessionInfo.parameters.orderid;
+        console.log(orderId);
         
+
         const orders = await fetchOrderData();
-        const order = orders.find(order => order.orderId === parseInt(orderId));
-        
-        if (!order) {
-            return res.status(404).json({ 
-                error: 'Order not found'
-            });
+
+        if (tag === 'verify-orderid') {
+            console.log('Verifying order ID');
+            let orderId = req.body.sessionInfo.parameters.orderid;
+            console.log("orderId: ", orderId);
+            
+            const r = verifyOrderId(orderId, orders);
+            return res.json({sessionInfo: {parameters: { orderFound: 'true' }}});
         }
-        
-        res.json({
-            success: true,
-            data: order
-        });
-        
+
+        if (tag === 'verify-phonenumber') {
+            let phoneNumber = req.body.sessionInfo.parameters.phoneNumber;
+            const r = verifyPhoneNumber(orderId, phoneNumber, orders);
+            return res.status(200).json({ success: r.ok, code: r.code });
+        }
+
+        if (tag === 'fetch-status') {
+            const r = fetchTrackingStatus(orderId, phoneNumber, orders);
+            if (r.ok) return res.status(200).json({ success: true, data: r.data });
+            return res.status(200).json({ success: false, error: 'Tracking order validation failed', code: r.code });
+        }
+
+        // Default behavior for backward compatibility
+        if (!orderId) {
+            return res.status(400).json({ error: 'Order ID is required' });
+        }
+
+        const order = orders.find(order => order.orderId === parseInt(orderId));
+        if (!order) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        return res.status(200).json({ success: true, data: order });
     } catch (error) {
-        res.status(500).json({ 
-            error: 'Internal server error'
-        });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
