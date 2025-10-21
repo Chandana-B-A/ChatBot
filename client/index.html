@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat-Bot</title>
+    <title>Scribe Tracker</title>
     <link rel="stylesheet" href="style.css">
     
     <!-- Dialogflow Messenger CSS -->
@@ -13,7 +13,7 @@
     <div class="app">
         <!-- Header -->
         <header class="header">
-            <h1>Chat-Bot</h1>
+            <h1>Scribe Tracker</h1>
         </header>
 
         <!-- Main Content -->
@@ -65,13 +65,28 @@
     <script src="https://www.gstatic.com/dialogflow-console/fast/df-messenger/prod/v1/df-messenger.js"></script>
     <df-messenger
       project-id="kpe-bot-uat"
-      agent-id="e6f972fd-b23c-4fee-b74a-835c6740139a"
+      agent-id="fc38f864-2777-45af-abf7-f46d5a1756a3"
       language-code="en"
       max-query-length="-1">
       <df-messenger-chat-bubble
-        chat-title="Litbuddy_V1">
+        chat-title="SCRIBE TRACKER">
       </df-messenger-chat-bubble>
     </df-messenger>
+
+    <!-- Custom Dialogflow Messenger Styling -->
+    <style>
+      df-messenger {
+        z-index: 999;
+        position: fixed;
+        --df-messenger-font-color: #000;
+        --df-messenger-font-family: Google Sans;
+        --df-messenger-chat-background: #f3f6fc;
+        --df-messenger-message-user-background: #d3e3fd;
+        --df-messenger-message-bot-background: #fff;
+        bottom: 16px;
+        right: 16px;
+      }
+    </style>
 
     <script src="script.js"></script>
 </body>

@@ -1,80 +1,46 @@
 const express = require('express');
 const cors = require('cors');
-const { Storage } = require('@google-cloud/storage');
 const basicAuth = require('./middleware/auth');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// GCP environment variables
-const storage = new Storage({
-    projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
-    credentials: {
-        type: 'service_account',
-        project_id: process.env.GOOGLE_CLOUD_PROJECT_ID,
-        private_key_id: process.env.GOOGLE_CLOUD_PRIVATE_KEY_ID,
-        private_key: process.env.GOOGLE_CLOUD_PRIVATE_KEY?.replace(/\\n/g, '\n').replace(/"/g, ''),
-        client_email: process.env.GOOGLE_CLOUD_CLIENT_EMAIL,
-        client_id: process.env.GOOGLE_CLOUD_CLIENT_ID,
-        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-        token_uri: 'https://oauth2.googleapis.com/token',
-        auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
-        client_x509_cert_url: process.env.GOOGLE_CLOUD_CLIENT_X509_CERT_URL
-    }
-});
-
-// Cloud Storage
-const bucketName = process.env.GOOGLE_CLOUD_BUCKET_NAME;
-const fileName = 'order.json';
-
-let ordersData = null;
-let lastFetchTime = 0;
-const CACHE_DURATION = 5 * 60 * 1000;
-
-
-// Function to fetch data from Cloud Storage
-async function fetchOrderData() {
-    try {
-        const now = Date.now();
-        
-        if (ordersData && (now - lastFetchTime) < CACHE_DURATION) {
-            return ordersData;
-        }
-        
-        const bucket = storage.bucket(bucketName);
-        const file = bucket.file(fileName);
-        
-        const [data] = await file.download();
-        ordersData = JSON.parse(data.toString());
-        lastFetchTime = now;
-        
-        return ordersData;
-    } catch (error) {
-        throw new Error(`Failed to fetch order data from Google Cloud Storage: ${error.message}`);
-    }
-}
-
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-app.get('/', (req, res) => {
-    res.json({ message: 'Welcome to the server!' });
-});
-
+// Import order verification functions
 const {
     verifyOrderId,
     verifyPhoneNumber,
-    fetchTrackingStatus
-} = require('./services/orderVerification');
+    fetchTrackingStatus,
+    
+} = require('./src/services/orderVerification');
 
 // Import order cancellation functions
 const {
     verifyOrderId: verifyOrderIdCancel,
     verifyPhone: verifyPhoneCancel,
-    updateOrderData
-} = require('./services/orderCancel');
+    updateOrderData,
+    fetchOrderData
+} = require('./src/services/orderCancel');
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Request logging middleware
+app.use((req, res, next) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${req.method} ${req.url}`);
+    if (req.body && Object.keys(req.body).length > 0) {
+        console.log('Request body:', JSON.stringify(req.body, null, 2));
+    }
+    next();
+});
+
+app.get('/', (req, res) => {
+    res.json({ message: 'Welcome to the server!' });
+});
+
+
 
 app.post('/api/order', basicAuth, async (req, res) => {
     console.log(req.body);
@@ -133,7 +99,9 @@ app.post('/api/orderCancel', basicAuth, async (req, res) => {
         console.log('Cancellation tag:', tag);
         
         let orderId = req.body.sessionInfo?.parameters?.orderid || req.body.orderId;
-        let phoneNumber = req.body.sessionInfo?.parameters?.phoneNumber || req.body.phoneNumber;
+        // Get phone number from webhook parameter and sanitize to digits
+        let rawPhone = req.body.sessionInfo?.parameters?.phonenumber;
+        let phoneNumber = rawPhone ? String(rawPhone).replace(/\D/g, '') : undefined;
         
         console.log('OrderId:', orderId, 'PhoneNumber:', phoneNumber);
 
@@ -145,15 +113,23 @@ app.post('/api/orderCancel', basicAuth, async (req, res) => {
             
             if (result.success) {
                 return res.status(200).json({
-                    success: true,
-                    data: result.data,
-                    sessionInfo: { parameters: { orderFound: 'true' } }
+                    fulfillmentResponse: {},
+                    sessionInfo: {
+                        parameters: {
+                            orderFound: 'true',
+                            bookName: result.data.bookName,
+                            orderStatus: result.data.status
+                        }
+                    }
                 });
             } else {
                 return res.status(200).json({
-                    success: false,
-                    error: result.error,
-                    message: result.message
+                    fulfillmentResponse: {},
+                    sessionInfo: {
+                        parameters: {
+                            orderFound: 'false'
+                        }
+                    }
                 });
             }
         }
@@ -172,17 +148,75 @@ app.post('/api/orderCancel', basicAuth, async (req, res) => {
             const result = await verifyPhoneCancel(orderId, phoneNumber);
             console.log('verifyPhoneCancel result:', result);
             
-            return res.status(200).json(result);
+            if (result.success) {
+                // Phone number verified successfully for the provided order ID
+                return res.status(200).json({
+                    fulfillmentResponse: {},
+                    sessionInfo: {
+                        parameters: {
+                            phoneVerified: 'true'
+                        }
+                    }
+                });
+            } else if (result.error === 'Order already cancelled') {
+                // Order is already cancelled but phone verification was successful
+                return res.status(200).json({
+                    fulfillmentResponse: {
+                        messages: [{
+                            text: {
+                                text: ['Good news! This order has already been cancelled. No further action needed.']
+                            }
+                        }]
+                    },
+                    sessionInfo: {
+                        parameters: {
+                            phoneVerified: 'true',
+                            orderStatus: 'cancelled'
+                        }
+                    }
+                });
+            } else {
+                return res.status(200).json({
+                    fulfillmentResponse: {},
+                    sessionInfo: {
+                        parameters: {
+                            phoneVerified: 'false'
+                        }
+                    }
+                });
+            }
         }
 
         if (tag === 'cancel-order') {
             console.log('Processing order cancellation');
             
+            // Get confirmation response
+            const confirmationResponse = req.body.sessionInfo?.parameters?.confirmationresponse;
+            console.log('Confirmation response:', confirmationResponse);
+            
+            // Check if user confirmed cancellation
+            if (confirmationResponse !== 'yes') {
+                console.log('Order cancellation declined by user');
+                return res.status(200).json({
+                    fulfillmentResponse: {
+                        messages: [{
+                            text: {
+                                text: ['Order cancellation has been cancelled. Your order remains active.']
+                            }
+                        }]
+                    },
+                    sessionInfo: {
+                        parameters: {
+                            cancellationComplete: 'false',
+                            cancellationDeclined: 'true'
+                        }
+                    }
+                });
+            }
+            
             if (!orderId || !phoneNumber) {
                 return res.status(400).json({
-                    success: false,
-                    error: 'Missing required fields',
-                    message: 'Both orderId and phoneNumber are required for cancellation'
+                    fulfillmentResponse: {}
                 });
             }
             
@@ -190,7 +224,9 @@ app.post('/api/orderCancel', basicAuth, async (req, res) => {
             const phoneVerification = await verifyPhoneCancel(orderId, phoneNumber);
             
             if (!phoneVerification.success) {
-                return res.status(200).json(phoneVerification);
+                return res.status(200).json({
+                    fulfillmentResponse: {}
+                });
             }
             
             // If phone verification successful, proceed with cancellation
@@ -206,9 +242,13 @@ app.post('/api/orderCancel', basicAuth, async (req, res) => {
                 
                 if (orderIndex === -1) {
                     return res.status(200).json({
-                        success: false,
-                        error: 'Order not found',
-                        message: 'Order not found for cancellation'
+                        fulfillmentResponse: {
+                            messages: [{
+                                text: {
+                                    text: ['Order not found for cancellation.']
+                                }
+                            }]
+                        }
                     });
                 }
                 
@@ -220,41 +260,112 @@ app.post('/api/orderCancel', basicAuth, async (req, res) => {
                 await updateOrderData(orders);
                 
                 return res.status(200).json({
-                    success: true,
-                    message: 'Order cancelled successfully',
-                    data: {
-                        orderId: orders[orderIndex].orderId,
-                        bookName: orders[orderIndex].bookName,
-                        status: 'cancelled',
-                        cancelled: true
+                    fulfillmentResponse: {
+                        messages: [{
+                            text: {
+                                text: [`Success! Your order for "${orders[orderIndex].bookName}" (Order ID: ${orders[orderIndex].orderId}) has been cancelled successfully. You will receive a confirmation email shortly.`]
+                            }
+                        }]
+                    },
+                    sessionInfo: {
+                        parameters: {
+                            cancellationComplete: 'true',
+                            cancelledOrderId: orders[orderIndex].orderId,
+                            cancelledBookName: orders[orderIndex].bookName
+                        }
                     }
                 });
                 
             } catch (updateError) {
                 console.error('Error updating order:', updateError);
                 return res.status(500).json({
-                    success: false,
-                    error: 'Update failed',
-                    message: 'Failed to cancel order. Please try again.'
+                    fulfillmentResponse: {
+                        messages: [{
+                            text: {
+                                text: ['Failed to cancel order. Please try again or contact customer support.']
+                            }
+                        }]
+                    }
                 });
             }
         }
-
-        // Default response for unknown tags
         return res.status(400).json({
-            success: false,
-            error: 'Invalid tag',
-            message: 'Unknown operation tag'
-        });
-        
+            fulfillmentResponse: {
+                messages: [{
+                    text: {
+                        text: ['Unknown operation. Please try again.']
+                    }
+                }]
+            }
+        });        
     } catch (error) {
         console.error('Order cancellation error:', error);
         return res.status(500).json({
-            success: false,
-            error: 'Internal server error',
-            message: 'Unable to process cancellation request'
+            fulfillmentResponse: {
+                messages: [{
+                    text: {
+                        text: ['Sorry, there was an error processing your request. Please try again later.']
+                    }
+                }]
+            }
         });
     }
+});
+
+// Manually update cancelled status from true to false
+app.put('/api/updateCancelledOrders', basicAuth, async (req, res) => {
+    console.log('Update cancelled orders endpoint called');
+    try {
+        // Fetch current orders data
+        const orders = await fetchOrderData();
+        
+        let updatedCount = 0;
+        
+        // Update all orders where cancelled is true to false
+        orders.forEach(order => {
+            if (order.cancelled === true) {
+                order.cancelled = false;
+                order.status = order.status === 'cancelled' ? 'active' : order.status;
+                updatedCount++;
+            }
+        });
+        
+        if (updatedCount === 0) {
+            return res.status(200).json({
+                success: true,
+                message: 'No cancelled orders found to update',
+                updatedCount: 0
+            });
+        }
+        
+        // Update the data in cloud storage
+        await updateOrderData(orders);
+        
+        console.log(`Successfully updated ${updatedCount} orders from cancelled=true to cancelled=false`);
+        
+        return res.status(200).json({
+            success: true,
+            message: `Successfully updated ${updatedCount} orders from cancelled=true to cancelled=false`,
+            updatedCount: updatedCount
+        });
+        
+    } catch (error) {
+        console.error('Error updating cancelled orders:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Failed to update cancelled orders',
+            message: error.message
+        });
+    }
+});
+
+// Error handling
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 app.listen(PORT, () => {

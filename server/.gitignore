@@ -3,3 +3,7 @@
 .env.local
 .env.development
 .env.production
+
+# Ngrok files
+ngrok.exe
+ngrok.zip

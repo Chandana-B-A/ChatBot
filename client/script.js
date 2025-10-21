@@ -1,8 +1,8 @@
 // Configuration
 const DIALOGFLOW_CONFIG = {
     projectId: 'kpe-bot-uat',
-    agentId: 'e6f972fd-b23c-4fee-b74a-835c6740139a',
-    webhookUrl: 'https://dialogflow.cloud.google.com/v1/cx/integrations/messenger/webhook/projects/kpe-bot-uat/agents/e6f972fd-b23c-4fee-b74a-835c6740139a/sessions/',
+    agentId: 'fc38f864-2777-45af-abf7-f46d5a1756a3',
+    webhookUrl: 'https://dialogflow.cloud.google.com/v1/cx/integrations/messenger/webhook/projects/kpe-bot-uat/agents/fc38f864-2777-45af-abf7-f46d5a1756a3/sessions/',
     sessionId: null
 };
 

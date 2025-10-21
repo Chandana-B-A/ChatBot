@@ -186,5 +186,6 @@ async function verifyPhone(orderId, phoneNumber) {
 module.exports = {
     verifyOrderId,
     verifyPhone,
-    updateOrderData
+    updateOrderData,
+    fetchOrderData
 };
