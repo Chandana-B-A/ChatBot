@@ -11,7 +11,10 @@ const {
     verifyOrderId,
     verifyPhoneNumber,
     fetchTrackingStatus,
-    
+    verifyDOB,
+    fetchTrackingStatusByDOB,
+    fetchOrderData: fetchOrderDataService,
+    invalidateOrdersCache: invalidateOrdersCacheService
 } = require('./src/services/orderVerification');
 
 // Import order cancellation functions
@@ -41,46 +44,112 @@ app.get('/', (req, res) => {
 });
 
 
-
 app.post('/api/order', basicAuth, async (req, res) => {
     console.log(req.body);
     try {
-        let tag = req.body.fulfillmentInfo.tag;
+        // Optional cache busting for debugging/stale data issues
+        const forceRefresh = (req.body && (req.body.forceRefresh === true || req.body.forceRefresh === 'true'))
+            || (req.query && (req.query.forceRefresh === 'true' || req.query.refreshCache === 'true'));
+        if (forceRefresh) {
+            console.log('Force refresh requested; invalidating orders cache');
+            invalidateOrdersCacheService();
+        }
+        // Read tag from either top-level or Dialogflow CX shape
+        let tag = req.body.tag || (req.body.fulfillmentInfo && req.body.fulfillmentInfo.tag);
         console.log(tag);
-        
-        let orderId = req.body.sessionInfo.parameters.orderid;
-        console.log(orderId);
+
+        // Read orderId safely. Keep the original line when available.
+        let orderIdSafe = (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.orderid) 
+            ?? req.body.orderId 
+            ?? (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.order_id);
+        console.log(orderIdSafe);
         
 
-        const orders = await fetchOrderData();
+        // Fetch orders from Cloud Storage, but do not crash if it fails
+        let orders = [];
+        try {
+            orders = await fetchOrderDataService();
+        } catch (e) {
+            console.error('Failed to fetch order data from GCS:', e.message);
+        }
 
         if (tag === 'verify-orderid') {
             console.log('Verifying order ID');
-            let orderId = req.body.sessionInfo.parameters.orderid;
+            // Keep the explicit line when sessionInfo exists; otherwise fall back
+            let orderId;
+            if (req.body.sessionInfo && req.body.sessionInfo.parameters && (req.body.sessionInfo.parameters.orderid !== undefined)) {
+                orderId = req.body.sessionInfo.parameters.orderid; // keep this line as requested
+            } else {
+                orderId = orderIdSafe;
+            }
             console.log("orderId: ", orderId);
-            
+
             const r = verifyOrderId(orderId, orders);
-            return res.json({sessionInfo: {parameters: { orderFound: 'true' }}});
+            console.log('Order ID verification result:', r);
+            if (r.ok) {
+                return res.json({ sessionInfo: { parameters: { orderFound: 'true' } } });
+            }
+            return res.json({ sessionInfo: { parameters: { orderFound: 'false' } } });
         }
 
         if (tag === 'verify-phonenumber') {
-            let phoneNumber = req.body.sessionInfo.parameters.phoneNumber;
-            const r = verifyPhoneNumber(orderId, phoneNumber, orders);
-            return res.status(200).json({ success: r.ok, code: r.code });
+            console.log('Verifying phone number');
+            let phonenumber = (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.phonenumber)
+                ?? req.body.phonenumber
+                ?? (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.phone_number);
+            console.log("orderId: ", orderIdSafe);
+                console.log("phoneNumber: ", phonenumber);
+                const r = verifyPhoneNumber(orderIdSafe, phonenumber, orders);
+            console.log('Phone verification result:', r);
+            if (r.ok) {
+                return res.json({ sessionInfo: { parameters: { phoneFound: 'true' } } });
+            }
+            return res.json({ sessionInfo: { parameters: { phoneFound: 'false' } } });
+        }
+
+        if (tag === 'verify-dob') {
+            console.log('Verifying date of birth');
+            let dob = (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.dob)
+                ?? req.body.dob
+                ?? (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.date_of_birth)
+                ?? (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.birthdate)
+                ?? (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.dateOfBirth);
+            console.log("orderId: ", orderIdSafe);
+            console.log("dob: ", dob);
+            const r = verifyDOB(orderIdSafe, dob, orders);
+            console.log('DOB verification result:', r);
+            if (r.ok) {
+                return res.json({ sessionInfo: { parameters: { dobFound: 'true' } } });
+            }
+            return res.json({ sessionInfo: { parameters: { dobFound: 'false' } } });
         }
 
         if (tag === 'fetch-status') {
-            const r = fetchTrackingStatus(orderId, phoneNumber, orders);
-            if (r.ok) return res.status(200).json({ success: true, data: r.data });
+            let dob = (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.dob)
+                ?? req.body.dob
+                ?? (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.date_of_birth)
+                ?? (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.birthdate)
+                ?? (req.body.sessionInfo && req.body.sessionInfo.parameters && req.body.sessionInfo.parameters.dateOfBirth);
+            const r = fetchTrackingStatusByDOB(orderIdSafe, dob, orders);
+            console.log("orderId: ", orderIdSafe);
+            console.log("dob: ", dob);
+            console.log('Fetch tracking status result:', r);
+            if (r.ok) {
+                return res.status(200).json({
+                    success: true,
+                    data: r.data,
+                    sessionInfo: { parameters: { status: r.data.status } }
+                });
+            }
             return res.status(200).json({ success: false, error: 'Tracking order validation failed', code: r.code });
         }
 
         // Default behavior for backward compatibility
-        if (!orderId) {
+        if (!orderIdSafe) {
             return res.status(400).json({ error: 'Order ID is required' });
         }
 
-        const order = orders.find(order => order.orderId === parseInt(orderId));
+        const order = orders.find(order => order.orderId === parseInt(orderIdSafe));
         if (!order) {
             return res.status(404).json({ error: 'Order not found' });
         }

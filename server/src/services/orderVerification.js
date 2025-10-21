@@ -1,7 +1,51 @@
+const { Storage } = require('@google-cloud/storage');
+require('dotenv').config();
+
 function normalizeNumber(n) {
     if (n === undefined || n === null) return undefined;
     const parsed = parseInt(String(n).trim(), 10);
     return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+// Cloud Storage config and simple in-memory cache
+const storage = new Storage({
+    projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
+    credentials: {
+        type: 'service_account',
+        project_id: process.env.GOOGLE_CLOUD_PROJECT_ID,
+        private_key_id: process.env.GOOGLE_CLOUD_PRIVATE_KEY_ID,
+        private_key: process.env.GOOGLE_CLOUD_PRIVATE_KEY?.replace(/\\n/g, '\n').replace(/"/g, ''),
+        client_email: process.env.GOOGLE_CLOUD_CLIENT_EMAIL,
+        client_id: process.env.GOOGLE_CLOUD_CLIENT_ID,
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        token_uri: 'https://oauth2.googleapis.com/token',
+        auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
+        client_x509_cert_url: process.env.GOOGLE_CLOUD_CLIENT_X509_CERT_URL
+    }
+});
+const bucketName = process.env.GOOGLE_CLOUD_BUCKET_NAME;
+const fileName = 'order.json';
+let ordersData = null;
+let lastFetchTime = 0;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+function invalidateOrdersCache() {
+    ordersData = null;
+    lastFetchTime = 0;
+}
+
+async function fetchOrderData() {
+    const now = Date.now();
+    if (ordersData && (now - lastFetchTime) < CACHE_DURATION) {
+        return ordersData;
+    }
+    console.log('Refreshing orders from GCS bucket:', bucketName, 'file:', fileName);
+    const bucket = storage.bucket(bucketName);
+    const file = bucket.file(fileName);
+    const [data] = await file.download();
+    ordersData = JSON.parse(data.toString());
+    lastFetchTime = now;
+    return ordersData;
 }
 
 function verifyOrderId(orderId, orders) {
@@ -13,20 +57,68 @@ function verifyOrderId(orderId, orders) {
     return { ok: true, code: 'ORDER_ID_VALID', order };
 }
 
-function verifyPhoneNumber(orderId, phoneNumber, orders) {
-    const idCheck = verifyOrderId(orderId, orders);
-    if (!idCheck.ok) return { ok: false, code: idCheck.code };
-    const phone = normalizeNumber(phoneNumber);
-    if (phone === undefined) return { ok: false, code: 'PHONE_REQUIRED' };
-    const storedPhone = normalizeNumber(idCheck.order.phNum);
-    if (phone !== storedPhone) return { ok: false, code: 'PHONE_MISMATCH' };
-    return { ok: true, code: 'PHONE_MATCH', order: idCheck.order };
+function normalizeDobVariants(s) {
+    if (s === undefined || s === null) return [];
+    if (typeof s === 'object' && !Array.isArray(s)) {
+        const y = parseInt(String(s.year ?? s.y ?? '').trim(), 10);
+        const m = parseInt(String(s.month ?? s.m ?? '').trim(), 10);
+        const d = parseInt(String(s.day ?? s.d ?? '').trim(), 10);
+        if (Number.isNaN(y) || Number.isNaN(m) || Number.isNaN(d)) return [];
+        if (m < 1 || m > 12 || d < 1 || d > 31) return [];
+        const canon = `${y.toString().padStart(4, '0')}${m.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}`;
+        return [canon];
+    }
+    const raw = String(s).trim();
+    if (!raw) return [];
+    const digits = raw.replace(/[^0-9]/g, '');
+    if (digits.length !== 8) return [];
+    const out = [];
+    const yFirst = parseInt(digits.slice(0, 4), 10);
+    if (yFirst >= 1900 && yFirst <= 2100) {
+        const y = yFirst;
+        const m = parseInt(digits.slice(4, 6), 10);
+        const d = parseInt(digits.slice(6, 8), 10);
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            out.push(`${y.toString().padStart(4, '0')}${m.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}`);
+        }
+    } else {
+        const y = parseInt(digits.slice(4, 8), 10);
+        // DDMMYYYY
+        const d = parseInt(digits.slice(0, 2), 10);
+        const m = parseInt(digits.slice(2, 4), 10);
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            out.push(`${y.toString().padStart(4, '0')}${m.toString().padStart(2, '0')}${d.toString().padStart(2, '0')}`);
+        }
+        // MMDDYYYY
+        const m2 = parseInt(digits.slice(0, 2), 10);
+        const d2 = parseInt(digits.slice(2, 4), 10);
+        if (m2 >= 1 && m2 <= 12 && d2 >= 1 && d2 <= 31) {
+            out.push(`${y.toString().padStart(4, '0')}${m2.toString().padStart(2, '0')}${d2.toString().padStart(2, '0')}`);
+        }
+    }
+    return Array.from(new Set(out));
 }
 
-function fetchTrackingStatus(orderId, phoneNumber, orders) {
-    const phoneCheck = verifyPhoneNumber(orderId, phoneNumber, orders);
-    if (!phoneCheck.ok) return { ok: false, code: phoneCheck.code };
-    const o = phoneCheck.order;
+function verifyDOB(orderId, dob, orders) {
+    const idCheck = verifyOrderId(orderId, orders);
+    if (!idCheck.ok) return { ok: false, code: idCheck.code };
+    console.log('Verifying DOB for order:', orderId);
+    console.log('Input DOB:', dob);
+    const inputCandidates = normalizeDobVariants(dob);
+    if (!inputCandidates.length) return { ok: false, code: 'DOB_REQUIRED' };
+    const storedCandidates = normalizeDobVariants(idCheck.order.dob);
+    console.log('Normalized candidates (input):', inputCandidates);
+    console.log('Normalized candidates (stored):', storedCandidates);
+    if (!storedCandidates.length) return { ok: false, code: 'DOB_NOT_AVAILABLE' };
+    const matched = inputCandidates.some(c => storedCandidates.includes(c));
+    if (!matched) return { ok: false, code: 'DOB_MISMATCH' };
+    return { ok: true, code: 'DOB_MATCH', order: idCheck.order };
+}
+
+function fetchTrackingStatusByDOB(orderId, dob, orders) {
+    const dobCheck = verifyDOB(orderId, dob, orders);
+    if (!dobCheck.ok) return { ok: false, code: dobCheck.code };
+    const o = dobCheck.order;
     const data = {
         orderId: o.orderId,
         bookName: o.bookName,
@@ -40,7 +132,11 @@ function fetchTrackingStatus(orderId, phoneNumber, orders) {
 }
 
 module.exports = {
+    // data access
+    fetchOrderData,
+    invalidateOrdersCache,
+    // existing services
     verifyOrderId,
-    verifyPhoneNumber,
-    fetchTrackingStatus
+    verifyDOB,
+    fetchTrackingStatusByDOB
 };
